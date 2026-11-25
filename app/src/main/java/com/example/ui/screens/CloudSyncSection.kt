@@ -117,6 +117,26 @@ fun CloudSyncSection(
           color = FigmaMuted
         )
 
+        syncState.pauseBannerMessage?.let { pauseMsg ->
+          Surface(
+            color = FigmaAmber.copy(alpha = 0.12f),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .border(1.dp, FigmaAmber.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+              .testTag("cloud_sync_paused_banner")
+          ) {
+            Row(
+              modifier = Modifier.padding(10.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+              Icon(Icons.Default.Warning, contentDescription = null, tint = FigmaAmber, modifier = Modifier.size(18.dp))
+              Text(pauseMsg, fontSize = 12.sp, color = FigmaInk, modifier = Modifier.weight(1f))
+            }
+          }
+        }
+
         syncState.lastSummaryMessage?.let { summary ->
           Surface(
             color = FigmaSoftTeal,
@@ -232,7 +252,7 @@ fun CloudSyncSection(
         ) {
           Button(
             onClick = { cloudSyncViewModel.syncNow(forceRetryFailed = true) },
-            enabled = !syncState.isSyncing,
+            enabled = !syncState.isSyncing && !syncState.isCloudSyncPaused,
             colors = ButtonDefaults.buttonColors(containerColor = FigmaTeal, contentColor = FigmaWhite),
             shape = RoundedCornerShape(10.dp),
             modifier = Modifier
@@ -244,6 +264,10 @@ fun CloudSyncSection(
               CircularProgressIndicator(color = FigmaWhite, strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
               Spacer(modifier = Modifier.width(6.dp))
               Text("Syncing...")
+            } else if (syncState.isCloudSyncPaused) {
+              Icon(Icons.Default.Sync, contentDescription = null)
+              Spacer(modifier = Modifier.width(6.dp))
+              Text("Sync Paused (Phase 1)", fontWeight = FontWeight.SemiBold, maxLines = 1)
             } else {
               Icon(Icons.Default.Sync, contentDescription = null)
               Spacer(modifier = Modifier.width(6.dp))

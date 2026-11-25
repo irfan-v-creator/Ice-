@@ -6,8 +6,9 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- Exclude local Room SQLite databases, session safety markers, and pre-migration backups
+         from Google Auto Backup to prevent cross-account contamination and stale WAL restore -->
+    <exclude domain="database" path="."/>
+    <exclude domain="sharedpref" path="icetrack_session_safety_prefs.xml"/>
+    <exclude domain="file" path="legacy_backups"/>
 </full-backup-content>

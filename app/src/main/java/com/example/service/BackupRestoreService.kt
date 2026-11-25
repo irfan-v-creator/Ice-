@@ -46,6 +46,8 @@ import com.example.domain.model.ReturnSettlementType
 import com.example.domain.model.StockMovementType
 import com.example.domain.model.SubledgerEntryType
 import com.example.domain.model.UnitType
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import org.json.JSONObject
 
 data class BackupValidationResult(
@@ -607,8 +609,9 @@ object BackupRestoreService {
   suspend fun restoreDatabaseFromJson(
     db: IceTrackDatabase,
     jsonString: String,
-    reason: String = "Full database restore from backup"
-  ): BackupValidationResult {
+    reason: String = "Full database restore from backup",
+    mutationGate: SessionMutationGate? = null
+  ): BackupValidationResult = guardSessionMutation(mutationGate) {
     val validation = validateBackupJson(jsonString)
     if (!validation.isValid) {
       throw IllegalArgumentException(validation.errorMessage ?: "Invalid backup JSON")
@@ -1209,7 +1212,7 @@ object BackupRestoreService {
       )
     }
 
-    return validation
+    validation
   }
 }
 

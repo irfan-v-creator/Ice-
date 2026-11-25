@@ -40,51 +40,40 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.data.local.IceTrackDatabase
-import com.example.data.sync.CloudSyncRepository
-import com.example.data.sync.IceTrackSyncDatabase
-import com.example.ui.auth.GoogleSignInManager
-import com.example.ui.screens.AuthScreen
-import com.example.ui.viewmodel.CloudSyncViewModel
-import kotlinx.coroutines.launch
-import com.example.data.repository.AuditRepository
-import com.example.data.repository.CreditDebitNoteRepository
-import com.example.data.repository.CustomerRepository
-import com.example.data.repository.ExpenseRepository
-import com.example.data.repository.InventoryRepository
-import com.example.data.repository.InvoiceLifecycleRepository
-import com.example.data.repository.PaymentReminderRepository
-import com.example.data.repository.ProductRepository
-import com.example.data.repository.PurchaseRepository
-import com.example.data.repository.RefundRepository
-import com.example.data.repository.ReturnRepository
-import com.example.data.repository.SalesRepository
-import com.example.data.repository.SettingsRepository
 import com.example.data.repository.SubledgerRepository
-import com.example.data.repository.SupplierRepository
 import com.example.service.NotificationService
+import com.example.session.ActiveUserSession
+import com.example.session.SessionScopeManager
+import com.example.session.SessionState
 import com.example.ui.navigation.Screen
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CreditDebitNotesAuditScreen
 import com.example.ui.screens.CustomerListScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.ExpensesScreen
 import com.example.ui.screens.InventoryStockScreen
+import com.example.ui.screens.LegacyMigrationPromptScreen
 import com.example.ui.screens.MoreScreen
-import com.example.ui.screens.OperationsPlaceholderScreen
 import com.example.ui.screens.PaymentReminderDashboardScreen
 import com.example.ui.screens.ProductListScreen
 import com.example.ui.screens.PurchaseManagementScreen
 import com.example.ui.screens.ReminderSendConfirmationDialog
-import com.example.ui.screens.SalesBillingScreen
 import com.example.ui.screens.ReportsAnalyticsScreen
+import com.example.ui.screens.SalesBillingScreen
+import com.example.ui.screens.SessionErrorScreen
+import com.example.ui.screens.SessionInitializingScreen
+import com.example.ui.screens.SessionRecoveryRequiredScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.SignOutBlockingDialog
 import com.example.ui.screens.SubledgerScreen
 import com.example.ui.screens.SupplierListScreen
 import com.example.ui.theme.FigmaBackground
@@ -96,6 +85,7 @@ import com.example.ui.theme.FigmaSoftTeal
 import com.example.ui.theme.FigmaTeal
 import com.example.ui.theme.FigmaWhite
 import com.example.ui.theme.IceTrackTheme
+import com.example.ui.viewmodel.CloudSyncViewModel
 import com.example.ui.viewmodel.CustomerViewModel
 import com.example.ui.viewmodel.DashboardViewModel
 import com.example.ui.viewmodel.ExpenseViewModel
@@ -108,6 +98,9 @@ import com.example.ui.viewmodel.ReportsViewModel
 import com.example.ui.viewmodel.SalesViewModel
 import com.example.ui.viewmodel.SettingsViewModel
 import com.example.ui.viewmodel.SupplierViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
@@ -116,152 +109,282 @@ class MainActivity : ComponentActivity() {
     enableEdgeToEdge()
 
     NotificationService.createNotificationChannels(applicationContext)
-
-    val database = IceTrackDatabase.getInstance(applicationContext)
-    val productRepo = ProductRepository(database)
-    val supplierRepo = SupplierRepository(database)
-    val customerRepo = CustomerRepository(database)
-    val subledgerRepo = SubledgerRepository(database)
-    val settingsRepo = SettingsRepository(database)
-    val inventoryRepo = InventoryRepository(database)
-    val purchaseRepo = PurchaseRepository(database)
-    val salesRepo = SalesRepository(database)
-    val expenseRepo = ExpenseRepository(database)
-    val reminderRepo = PaymentReminderRepository(database)
-    val returnRepo = ReturnRepository(database)
-    val noteRepo = CreditDebitNoteRepository(database)
-    val refundRepo = RefundRepository(database)
-    val auditRepo = AuditRepository(database)
-    val lifecycleRepo = InvoiceLifecycleRepository(database)
-
-    val dashboardViewModel by viewModels<DashboardViewModel> {
-      DashboardViewModel.Factory(
-        productRepo,
-        supplierRepo,
-        customerRepo,
-        subledgerRepo,
-        salesRepo,
-        purchaseRepo,
-        inventoryRepo
-      )
-    }
-    val productViewModel by viewModels<ProductViewModel> {
-      ProductViewModel.Factory(productRepo, supplierRepo, inventoryRepo)
-    }
-    val supplierViewModel by viewModels<SupplierViewModel> {
-      SupplierViewModel.Factory(supplierRepo, subledgerRepo)
-    }
-    val customerViewModel by viewModels<CustomerViewModel> {
-      CustomerViewModel.Factory(customerRepo, productRepo, subledgerRepo)
-    }
-    val settingsViewModel by viewModels<SettingsViewModel> {
-      SettingsViewModel.Factory(settingsRepo, database)
-    }
-    val inventoryViewModel by viewModels<InventoryViewModel> {
-      InventoryViewModel.Factory(inventoryRepo, productRepo)
-    }
-    val purchaseViewModel by viewModels<PurchaseViewModel> {
-      PurchaseViewModel.Factory(purchaseRepo, supplierRepo, productRepo, subledgerRepo, lifecycleRepo, returnRepo)
-    }
-    val salesViewModel by viewModels<SalesViewModel> {
-      SalesViewModel.Factory(salesRepo, customerRepo, productRepo, inventoryRepo, subledgerRepo, lifecycleRepo, returnRepo)
-    }
-    val expenseViewModel by viewModels<ExpenseViewModel> {
-      ExpenseViewModel.Factory(expenseRepo)
-    }
-    val reportsViewModel by viewModels<ReportsViewModel> {
-      ReportsViewModel.Factory(
-        salesRepo = salesRepo,
-        purchaseRepo = purchaseRepo,
-        productRepo = productRepo,
-        customerRepo = customerRepo,
-        supplierRepo = supplierRepo,
-        inventoryRepo = inventoryRepo,
-        expenseRepo = expenseRepo,
-        subledgerRepo = subledgerRepo,
-        returnRepo = returnRepo
-      )
-    }
-    val paymentReminderViewModel by viewModels<PaymentReminderViewModel> {
-      PaymentReminderViewModel.Factory(
-        customerRepository = customerRepo,
-        salesRepository = salesRepo,
-        subledgerRepository = subledgerRepo,
-        reminderRepository = reminderRepo
-      )
-    }
-    val financeLifecycleViewModel by viewModels<FinanceLifecycleViewModel> {
-      FinanceLifecycleViewModel.Factory(
-        subledgerRepo = subledgerRepo,
-        noteRepo = noteRepo,
-        refundRepo = refundRepo,
-        auditRepo = auditRepo,
-        customerRepo = customerRepo,
-        supplierRepo = supplierRepo,
-        salesRepo = salesRepo,
-        purchaseRepo = purchaseRepo
-      )
-    }
-
-    val syncDb = IceTrackSyncDatabase.getInstance(applicationContext)
-    val cloudSyncRepo = CloudSyncRepository(
-      context = applicationContext,
-      localDb = database,
-      syncDb = syncDb
-    )
+    val sessionManager = SessionScopeManager.getInstance(applicationContext)
+    sessionManager.startObservingAuth()
 
     setContent {
       IceTrackTheme {
-        val currentUser by GoogleSignInManager.authStateFlow()
-          .collectAsStateWithLifecycle(initialValue = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser)
+        val sessionState by sessionManager.sessionState.collectAsStateWithLifecycle()
         val context = LocalContext.current
         val appScope = rememberCoroutineScope()
+        var legacyBackupStatus by remember { mutableStateOf<String?>(null) }
 
-        if (currentUser == null) {
-          AuthScreen(
-            onAuthenticated = {
-              // authStateFlow updates automatically when signInWithCredential completes
-            }
-          )
-        } else {
-          val signedInUser = currentUser!!
-          key(signedInUser.uid) {
-            val cloudSyncViewModel: CloudSyncViewModel = viewModel(
-              key = "cloud_sync_${signedInUser.uid}",
-              factory = CloudSyncViewModel.Factory(
-                uid = signedInUser.uid,
-                userEmail = signedInUser.email ?: "",
-                userDisplayName = signedInUser.displayName ?: "",
-                syncRepository = cloudSyncRepo
-              )
+        when (val state = sessionState) {
+          SessionState.SignedOut -> {
+            AuthScreen(
+              onAuthenticated = {
+                // SessionScopeManager observes FirebaseAuth state flow after startup recovery
+              }
             )
-            MainAppContent(
-              dashboardViewModel = dashboardViewModel,
-              productViewModel = productViewModel,
-              supplierViewModel = supplierViewModel,
-              customerViewModel = customerViewModel,
-              settingsViewModel = settingsViewModel,
-              inventoryViewModel = inventoryViewModel,
-              purchaseViewModel = purchaseViewModel,
-              salesViewModel = salesViewModel,
-              expenseViewModel = expenseViewModel,
-              reportsViewModel = reportsViewModel,
-              paymentReminderViewModel = paymentReminderViewModel,
-              financeLifecycleViewModel = financeLifecycleViewModel,
-              subledgerRepo = subledgerRepo,
-              cloudSyncViewModel = cloudSyncViewModel,
-              onSignOut = {
+          }
+
+          is SessionState.RecoveryRequired -> {
+            SessionRecoveryRequiredScreen(
+              state = state,
+              onRetryRecovery = {
+                appScope.launch { sessionManager.retryStartupRecovery() }
+              },
+              onForceSignOut = {
+                appScope.launch { sessionManager.signOutFromBlockedPrompt() }
+              }
+            )
+          }
+
+          is SessionState.Initializing -> {
+            SessionInitializingScreen(state = state)
+          }
+
+          is SessionState.LegacyMigrationPrompt -> {
+            LegacyMigrationPromptScreen(
+              state = state,
+              backupExportStatus = legacyBackupStatus,
+              onExportLegacyBackupToUri = { uri ->
                 appScope.launch {
-                  GoogleSignInManager.signOutSafely(
-                    context = context,
-                    onBeforeSignOutCleanup = { cloudSyncViewModel.cleanupOnSignOut() }
+                  legacyBackupStatus = "Exporting legacy backup..."
+                  val res = sessionManager.exportRecoverableLegacyBackup()
+                  res.fold(
+                    onSuccess = { json ->
+                      runCatching {
+                        withContext(Dispatchers.IO) {
+                          context.contentResolver.openOutputStream(uri)?.use { out ->
+                            out.write(json.toByteArray(Charsets.UTF_8))
+                            out.flush()
+                          } ?: error("Cannot write to selected destination")
+                        }
+                      }.fold(
+                        onSuccess = { legacyBackupStatus = "Recoverable V5 JSON backup exported successfully." },
+                        onFailure = { err -> legacyBackupStatus = "Failed to save JSON backup: ${err.message}" }
+                      )
+                    },
+                    onFailure = { err ->
+                      legacyBackupStatus = "Backup export failed: ${err.message}"
+                    }
                   )
                 }
+              },
+              onConfirmMigrate = {
+                appScope.launch {
+                  sessionManager.confirmOwnerLegacyMigration(state.user)
+                }
+              },
+              onStartFresh = {
+                appScope.launch {
+                  sessionManager.startFreshWithoutLegacyMigration(state.user)
+                }
+              },
+              onSignOut = {
+                appScope.launch {
+                  sessionManager.signOutFromBlockedPrompt()
+                }
+              }
+            )
+          }
+
+          is SessionState.Error -> {
+            SessionErrorScreen(
+              state = state,
+              onRetry = {
+                appScope.launch { sessionManager.retryStartupRecovery() }
+              },
+              onSignOut = {
+                appScope.launch { sessionManager.signOutFromBlockedPrompt() }
+              }
+            )
+          }
+
+          is SessionState.Active -> {
+            IsolatedSessionHost(
+              session = state.session,
+              onSignOut = {
+                appScope.launch { sessionManager.requestSignOut() }
+              }
+            )
+          }
+
+          is SessionState.SigningOut -> {
+            state.session?.let { mountedSession ->
+              IsolatedSessionHost(
+                session = mountedSession,
+                onSignOut = {}
+              )
+            } ?: Box(
+              modifier = Modifier
+                .fillMaxSize()
+                .background(FigmaBackground)
+            )
+            SignOutBlockingDialog(
+              prompt = state.prompt,
+              onWaitRetry = {
+                appScope.launch { sessionManager.retryWaitForPendingWrites() }
+              },
+              onCancelSignOut = {
+                appScope.launch { sessionManager.cancelPendingSignOut() }
+              },
+              onConfirmDiscardAndSignOut = {
+                appScope.launch { sessionManager.confirmDiscardPendingWritesAndSignOut() }
               }
             )
           }
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun IsolatedSessionHost(
+  session: ActiveUserSession,
+  onSignOut: () -> Unit
+) {
+  key(session.sessionToken) {
+    CompositionLocalProvider(LocalViewModelStoreOwner provides session.viewModelStoreOwner) {
+      val token = session.sessionToken
+      val dashboardViewModel: DashboardViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "dashboard_$token",
+        factory = DashboardViewModel.Factory(
+          session.productRepo,
+          session.supplierRepo,
+          session.customerRepo,
+          session.subledgerRepo,
+          session.salesRepo,
+          session.purchaseRepo,
+          session.inventoryRepo
+        )
+      )
+      val productViewModel: ProductViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "product_$token",
+        factory = ProductViewModel.Factory(session.productRepo, session.supplierRepo, session.inventoryRepo)
+      )
+      val supplierViewModel: SupplierViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "supplier_$token",
+        factory = SupplierViewModel.Factory(session.supplierRepo, session.subledgerRepo)
+      )
+      val customerViewModel: CustomerViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "customer_$token",
+        factory = CustomerViewModel.Factory(session.customerRepo, session.productRepo, session.subledgerRepo)
+      )
+      val settingsViewModel: SettingsViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "settings_$token",
+        factory = SettingsViewModel.Factory(session.settingsRepo, session.database, session.mutationGate)
+      )
+      val inventoryViewModel: InventoryViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "inventory_$token",
+        factory = InventoryViewModel.Factory(session.inventoryRepo, session.productRepo)
+      )
+      val purchaseViewModel: PurchaseViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "purchase_$token",
+        factory = PurchaseViewModel.Factory(
+          session.purchaseRepo,
+          session.supplierRepo,
+          session.productRepo,
+          session.subledgerRepo,
+          session.lifecycleRepo,
+          session.returnRepo
+        )
+      )
+      val salesViewModel: SalesViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "sales_$token",
+        factory = SalesViewModel.Factory(
+          session.salesRepo,
+          session.customerRepo,
+          session.productRepo,
+          session.inventoryRepo,
+          session.subledgerRepo,
+          session.lifecycleRepo,
+          session.returnRepo
+        )
+      )
+      val expenseViewModel: ExpenseViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "expense_$token",
+        factory = ExpenseViewModel.Factory(session.expenseRepo)
+      )
+      val reportsViewModel: ReportsViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "reports_$token",
+        factory = ReportsViewModel.Factory(
+          salesRepo = session.salesRepo,
+          purchaseRepo = session.purchaseRepo,
+          productRepo = session.productRepo,
+          customerRepo = session.customerRepo,
+          supplierRepo = session.supplierRepo,
+          inventoryRepo = session.inventoryRepo,
+          expenseRepo = session.expenseRepo,
+          subledgerRepo = session.subledgerRepo,
+          returnRepo = session.returnRepo
+        )
+      )
+      val paymentReminderViewModel: PaymentReminderViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "reminder_$token",
+        factory = PaymentReminderViewModel.Factory(
+          customerRepository = session.customerRepo,
+          salesRepository = session.salesRepo,
+          subledgerRepository = session.subledgerRepo,
+          reminderRepository = session.reminderRepo
+        )
+      )
+      val financeLifecycleViewModel: FinanceLifecycleViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "finance_$token",
+        factory = FinanceLifecycleViewModel.Factory(
+          subledgerRepo = session.subledgerRepo,
+          noteRepo = session.noteRepo,
+          refundRepo = session.refundRepo,
+          auditRepo = session.auditRepo,
+          customerRepo = session.customerRepo,
+          supplierRepo = session.supplierRepo,
+          salesRepo = session.salesRepo,
+          purchaseRepo = session.purchaseRepo
+        )
+      )
+      val cloudSyncViewModel: CloudSyncViewModel = viewModel(
+        viewModelStoreOwner = session.viewModelStoreOwner,
+        key = "cloud_sync_$token",
+        factory = CloudSyncViewModel.Factory(
+          uid = session.uid,
+          userEmail = session.userEmail,
+          userDisplayName = session.userDisplayName,
+          syncRepository = session.cloudSyncRepo,
+          isReconciliationRequired = { session.reconciliationRequired }
+        )
+      )
+
+      MainAppContent(
+        dashboardViewModel = dashboardViewModel,
+        productViewModel = productViewModel,
+        supplierViewModel = supplierViewModel,
+        customerViewModel = customerViewModel,
+        settingsViewModel = settingsViewModel,
+        inventoryViewModel = inventoryViewModel,
+        purchaseViewModel = purchaseViewModel,
+        salesViewModel = salesViewModel,
+        expenseViewModel = expenseViewModel,
+        reportsViewModel = reportsViewModel,
+        paymentReminderViewModel = paymentReminderViewModel,
+        financeLifecycleViewModel = financeLifecycleViewModel,
+        subledgerRepo = session.subledgerRepo,
+        cloudSyncViewModel = cloudSyncViewModel,
+        onSignOut = onSignOut
+      )
     }
   }
 }

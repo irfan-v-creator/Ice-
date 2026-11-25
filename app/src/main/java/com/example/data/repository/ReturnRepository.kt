@@ -32,11 +32,16 @@ import com.example.domain.model.SubledgerEntryType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONObject
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class ReturnRepository(private val db: IceTrackDatabase) {
+class ReturnRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val salesDao = db.salesInvoiceDao()
   private val salesItemDao = db.salesInvoiceItemDao()
   private val salesReturnDao = db.salesReturnDao()
@@ -104,7 +109,8 @@ class ReturnRepository(private val db: IceTrackDatabase) {
     reason: String,
     notes: String = "",
     idempotencyKey: String? = null
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     if (!idempotencyKey.isNullOrBlank()) {
       val existing = salesReturnDao.getByIdempotencyKey(idempotencyKey.trim())
       if (existing != null) return@withTransaction existing.id
@@ -396,6 +402,7 @@ class ReturnRepository(private val db: IceTrackDatabase) {
     )
 
     returnId
+    }
   }
 
   /**
@@ -413,7 +420,8 @@ class ReturnRepository(private val db: IceTrackDatabase) {
     reason: String,
     notes: String = "",
     idempotencyKey: String? = null
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     if (!idempotencyKey.isNullOrBlank()) {
       val existing = purchaseReturnDao.getByIdempotencyKey(idempotencyKey.trim())
       if (existing != null) return@withTransaction existing.id
@@ -675,5 +683,6 @@ class ReturnRepository(private val db: IceTrackDatabase) {
     )
 
     returnId
+    }
   }
 }

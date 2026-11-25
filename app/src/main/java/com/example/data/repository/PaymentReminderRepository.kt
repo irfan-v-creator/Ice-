@@ -14,6 +14,9 @@ import com.example.domain.model.ReminderStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
+
 sealed class PrepareDraftResult {
   data class Created(
     val reminder: CustomerPaymentReminder,
@@ -41,7 +44,10 @@ sealed class HandoffPreparationResult {
   data class Blocked(val reason: String) : HandoffPreparationResult()
 }
 
-class PaymentReminderRepository(private val db: IceTrackDatabase) {
+class PaymentReminderRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val reminderDao = db.customerPaymentReminderDao()
   private val customerDao = db.customerDao()
   private val subledgerDao = db.subledgerDao()
@@ -97,7 +103,8 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
    * Freshly fetches live SSOT ledger balance and unpaid invoices, validates eligibility and phone,
    * and persists a DRAFT audit snapshot in a single database transaction.
    */
-  suspend fun createDraftReminder(customerId: Long): PrepareDraftResult = db.withTransaction {
+  suspend fun createDraftReminder(customerId: Long): PrepareDraftResult = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     when (val composition = computeLiveComposition(customerId)) {
       is ReminderCompositionResult.Blocked -> {
         PrepareDraftResult.Blocked(
@@ -140,6 +147,7 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
         PrepareDraftResult.Created(reminder = persisted, composed = composed)
       }
     }
+    }
   }
 
   /**
@@ -151,7 +159,8 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
   suspend fun verifyAndMarkWhatsAppOpened(
     draftReminderId: Long,
     whatsappPackageUsed: String?
-  ): HandoffPreparationResult = db.withTransaction {
+  ): HandoffPreparationResult = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val existing = reminderDao.getByIdSync(draftReminderId)
       ?: throw IllegalArgumentException("Reminder #$draftReminderId not found")
     check(existing.status == ReminderStatus.DRAFT) {
@@ -238,12 +247,14 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
         )
       }
     }
+    }
   }
 
   /**
    * Marks reminder as USER_CONFIRMED_SENT strictly upon explicit user confirmation after returning from WhatsApp.
    */
-  suspend fun confirmReminderSent(reminderId: Long) = db.withTransaction {
+  suspend fun confirmReminderSent(reminderId: Long) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val existing = reminderDao.getByIdSync(reminderId)
       ?: throw IllegalArgumentException("Reminder #$reminderId not found")
     check(existing.status == ReminderStatus.WHATSAPP_OPENED) {
@@ -258,13 +269,15 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
         updatedAt = now
       )
     )
+    }
   }
 
   /**
    * Records that the user returned without sending (or cancelled confirmation).
    * Never promotes status to USER_CONFIRMED_SENT; preserves WHATSAPP_OPENED while dismissing the prompt.
    */
-  suspend fun dismissPendingConfirmationAsNotSent(reminderId: Long) = db.withTransaction {
+  suspend fun dismissPendingConfirmationAsNotSent(reminderId: Long) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val existing = reminderDao.getByIdSync(reminderId) ?: return@withTransaction
     if (existing.status == ReminderStatus.WHATSAPP_OPENED) {
       reminderDao.updateReminder(
@@ -275,12 +288,14 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
         )
       )
     }
+    }
   }
 
   /**
    * Marks a DRAFT or WHATSAPP_OPENED reminder as FAILED. Confirmed sent reminders remain immutable.
    */
-  suspend fun markReminderFailed(reminderId: Long, reason: String) = db.withTransaction {
+  suspend fun markReminderFailed(reminderId: Long, reason: String) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val existing = reminderDao.getByIdSync(reminderId) ?: return@withTransaction
     if (existing.status == ReminderStatus.USER_CONFIRMED_SENT) {
       return@withTransaction
@@ -293,6 +308,7 @@ class PaymentReminderRepository(private val db: IceTrackDatabase) {
         updatedAt = System.currentTimeMillis()
       )
     )
+    }
   }
 }
 

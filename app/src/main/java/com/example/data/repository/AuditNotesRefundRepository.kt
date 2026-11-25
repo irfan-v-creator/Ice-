@@ -33,11 +33,16 @@ import com.example.domain.model.SubledgerEntryType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONObject
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class AuditRepository(private val db: IceTrackDatabase) {
+class AuditRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val auditDao = db.financialAuditLogDao()
 
   val allAuditLogs: Flow<List<FinancialAuditLog>> = auditDao.observeAll().map { list ->
@@ -67,8 +72,8 @@ class AuditRepository(private val db: IceTrackDatabase) {
     afterJson: String = "",
     operationReference: String = "",
     createdAt: Long = System.currentTimeMillis()
-  ): Long {
-    return auditDao.insert(
+  ): Long = guardSessionMutation(mutationGate) {
+    auditDao.insert(
       FinancialAuditLogEntity(
         operationType = operationType,
         entityType = entityType,
@@ -85,7 +90,10 @@ class AuditRepository(private val db: IceTrackDatabase) {
   }
 }
 
-class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
+class CreditDebitNoteRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val noteDao = db.creditDebitNoteDao()
   private val subledgerDao = db.subledgerDao()
   private val allocationDao = db.paymentAllocationDao()
@@ -136,7 +144,8 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
     notes: String = "",
     applyToDues: Boolean = true,
     idempotencyKey: String? = null
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     if (!idempotencyKey.isNullOrBlank()) {
       val existing = noteDao.getByIdempotencyKey(idempotencyKey.trim())
       if (existing != null) return@withTransaction existing.id
@@ -263,6 +272,7 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
     )
 
     noteId
+    }
   }
 
   /**
@@ -273,7 +283,8 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
     noteId: Long,
     targetInvoiceId: Long? = null,
     reason: String = "Applied note to unpaid dues"
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val note = noteDao.getByIdSync(noteId) ?: throw IllegalArgumentException("Note #$noteId not found")
     require(note.status == NoteStatus.OPEN || note.status == NoteStatus.APPLIED) {
       "Note ${note.noteNumber} is ${note.status.displayName} and cannot be applied"
@@ -322,6 +333,7 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
       )
     )
     appliedNow
+    }
   }
 
   /**
@@ -331,7 +343,8 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
     noteId: Long,
     paymentMethod: PaymentMethod,
     reason: String
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim()
     require(cleanReason.isNotBlank()) { "Settlement reason is mandatory" }
     val note = noteDao.getByIdSync(noteId) ?: throw IllegalArgumentException("Note #$noteId not found")
@@ -382,9 +395,11 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
     )
 
     refundId
+    }
   }
 
-  suspend fun cancelUnusedNote(noteId: Long, reason: String) = db.withTransaction {
+  suspend fun cancelUnusedNote(noteId: Long, reason: String) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim()
     require(cleanReason.isNotBlank()) { "Cancellation reason is mandatory" }
     val note = noteDao.getByIdSync(noteId) ?: throw IllegalArgumentException("Note #$noteId not found")
@@ -412,6 +427,7 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 
   private suspend fun applyReductionToPartyInvoices(
@@ -481,7 +497,10 @@ class CreditDebitNoteRepository(private val db: IceTrackDatabase) {
   }
 }
 
-class RefundRepository(private val db: IceTrackDatabase) {
+class RefundRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val refundDao = db.refundRecordDao()
   private val subledgerDao = db.subledgerDao()
   private val auditDao = db.financialAuditLogDao()
@@ -504,7 +523,8 @@ class RefundRepository(private val db: IceTrackDatabase) {
     paymentMethod: PaymentMethod,
     referenceNumber: String,
     reason: String
-  ) = db.withTransaction {
+  ) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim().ifBlank { "Refund payout executed" }
     val record = refundDao.getByIdSync(refundRecordId)
       ?: throw IllegalArgumentException("Refund record #$refundRecordId not found")
@@ -564,6 +584,7 @@ class RefundRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 }
 

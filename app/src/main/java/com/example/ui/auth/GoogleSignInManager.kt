@@ -134,19 +134,44 @@ object GoogleSignInManager {
 
   /**
    * Detaches all active Firestore listeners first inside NonCancellable, clears Credential Manager
-   * session state, then signs out of FirebaseAuth so sign-out cannot race into PERMISSION_DENIED.
+   * session state, then signs out of FirebaseAuth so sign-out cannot fail silently.
+   * Aborts without calling FirebaseAuth.signOut() if pre-signout cleanup or credential clearing fails.
    */
   suspend fun signOutSafely(
     context: Context,
-    onBeforeSignOutCleanup: suspend () -> Unit,
+    onBeforeSignOutCleanup: suspend () -> Result<Unit>,
     auth: FirebaseAuth = FirebaseAuth.getInstance()
-  ) {
-    withContext(NonCancellable) {
-      runCatching { onBeforeSignOutCleanup() }
-      runCatching {
-        CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
-      }
+  ): Result<Unit> = withContext(NonCancellable) {
+    val cleanupResult = try {
+      onBeforeSignOutCleanup()
+    } catch (e: CancellationException) {
+      throw e
+    } catch (t: Throwable) {
+      Result.failure(t)
+    }
+    if (cleanupResult.isFailure) {
+      return@withContext Result.failure(
+        cleanupResult.exceptionOrNull()
+          ?: IllegalStateException("Pre-sign-out cleanup failed; aborting sign-out.")
+      )
+    }
+
+    try {
+      CredentialManager.create(context.applicationContext)
+        .clearCredentialState(ClearCredentialStateRequest())
+    } catch (e: CancellationException) {
+      throw e
+    } catch (t: Throwable) {
+      return@withContext Result.failure(t)
+    }
+
+    try {
       auth.signOut()
+      Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
+    } catch (t: Throwable) {
+      Result.failure(t)
     }
   }
 }

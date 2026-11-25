@@ -108,19 +108,70 @@ abstract class IceTrackSyncDatabase : RoomDatabase() {
   abstract fun syncStateDao(): SyncStateDao
 
   companion object {
-    @Volatile
-    private var INSTANCE: IceTrackSyncDatabase? = null
+    const val LEGACY_GLOBAL_SYNC_DB_NAME = "icetrack_sync.db"
 
+    private val openInstances = mutableMapOf<String, IceTrackSyncDatabase>()
+
+    @Deprecated(
+      message = "Global unauthenticated sync database access is prohibited. Use openForUid(context, uid).",
+      level = DeprecationLevel.ERROR
+    )
     fun getInstance(context: Context): IceTrackSyncDatabase {
-      return INSTANCE ?: synchronized(this) {
-        val instance = Room.databaseBuilder(
-          context.applicationContext,
-          IceTrackSyncDatabase::class.java,
-          "icetrack_sync.db"
-        ).build()
-        INSTANCE = instance
-        instance
+      throw IllegalStateException(
+        "Unauthenticated global IceTrackSyncDatabase access is prohibited. Sign in and use SessionScopeManager."
+      )
+    }
+
+    fun openForUid(context: Context, uid: String): IceTrackSyncDatabase {
+      val trimmedUid = uid.trim()
+      require(trimmedUid.isNotEmpty()) { "Cannot open sync database without a valid authenticated UID." }
+      val uidHash = com.example.data.local.DatabaseIntegrityManager.uidToSafeHash(trimmedUid)
+      val dbName = com.example.data.local.DatabaseIntegrityManager.uidSyncDbName(trimmedUid)
+      return synchronized(openInstances) {
+        val existing = openInstances[uidHash]
+        if (existing != null && existing.isOpen) {
+          existing
+        } else {
+          val built = buildSyncDatabase(context.applicationContext, dbName)
+          val report = com.example.data.local.DatabaseIntegrityManager.verifyIntegrity(built.openHelper.writableDatabase)
+          if (!report.isHealthy) {
+            runCatching { built.close() }
+            throw IllegalStateException(
+              "Sync database integrity verification failed for account ($uidHash): ${report.integrityMessage}"
+            )
+          }
+          openInstances[uidHash] = built
+          built
+        }
       }
+    }
+
+    fun closeForUid(uid: String): Result<Unit> {
+      val trimmedUid = uid.trim()
+      if (trimmedUid.isEmpty()) return Result.success(Unit)
+      val uidHash = com.example.data.local.DatabaseIntegrityManager.uidToSafeHash(trimmedUid)
+      val instance = synchronized(openInstances) { openInstances[uidHash] } ?: return Result.success(Unit)
+      val closeResult = com.example.data.local.DatabaseIntegrityManager.closeSafely(instance)
+      if (closeResult.isSuccess) {
+        synchronized(openInstances) {
+          if (openInstances[uidHash] === instance) {
+            openInstances.remove(uidHash)
+          }
+        }
+      }
+      return closeResult
+    }
+
+    internal fun openLegacySyncDatabase(context: Context): IceTrackSyncDatabase {
+      return buildSyncDatabase(context.applicationContext, LEGACY_GLOBAL_SYNC_DB_NAME)
+    }
+
+    internal fun buildSyncDatabase(context: Context, dbName: String): IceTrackSyncDatabase {
+      return Room.databaseBuilder(
+        context.applicationContext,
+        IceTrackSyncDatabase::class.java,
+        dbName
+      ).build()
     }
   }
 }

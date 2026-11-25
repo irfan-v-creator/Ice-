@@ -9,6 +9,8 @@ import com.example.data.local.IceTrackDatabase
 import com.example.data.repository.SettingsRepository
 import com.example.service.BackupRestoreService
 import com.example.service.BackupValidationResult
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,7 +35,8 @@ data class SettingsUiState(
 
 class SettingsViewModel(
   private val settingsRepository: SettingsRepository,
-  private val database: IceTrackDatabase? = null
+  private val database: IceTrackDatabase? = null,
+  private val mutationGate: SessionMutationGate? = null
 ) : ViewModel() {
 
   private val _uiState = MutableStateFlow(SettingsUiState())
@@ -80,12 +83,22 @@ class SettingsViewModel(
 
   fun saveProfile(onSuccess: () -> Unit) {
     viewModelScope.launch {
-      settingsRepository.setSetting("business_name", _uiState.value.businessName)
-      settingsRepository.setSetting("business_phone", _uiState.value.contactPhone)
-      settingsRepository.setSetting("business_address", _uiState.value.address)
-      settingsRepository.setSetting("fssai_number", _uiState.value.fssaiNumber)
-      _uiState.value = _uiState.value.copy(isSaved = true)
-      onSuccess()
+      try {
+        guardSessionMutation(mutationGate) {
+          settingsRepository.setSetting("business_name", _uiState.value.businessName)
+          settingsRepository.setSetting("business_phone", _uiState.value.contactPhone)
+          settingsRepository.setSetting("business_address", _uiState.value.address)
+          settingsRepository.setSetting("fssai_number", _uiState.value.fssaiNumber)
+        }
+        _uiState.value = _uiState.value.copy(isSaved = true)
+        onSuccess()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        _uiState.value = _uiState.value.copy(
+          backupMessage = e.message ?: "Unable to save profile while session is shutting down."
+        )
+      }
     }
   }
 
@@ -178,7 +191,8 @@ class SettingsViewModel(
           BackupRestoreService.restoreDatabaseFromJson(
             db = db,
             jsonString = json,
-            reason = reason
+            reason = reason,
+            mutationGate = mutationGate
           )
         }
         if (result.isValid) {
@@ -215,11 +229,12 @@ class SettingsViewModel(
 
   class Factory(
     private val settingsRepository: SettingsRepository,
-    private val database: IceTrackDatabase? = null
+    private val database: IceTrackDatabase? = null,
+    private val mutationGate: SessionMutationGate? = null
   ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-      return SettingsViewModel(settingsRepository, database) as T
+      return SettingsViewModel(settingsRepository, database, mutationGate) as T
     }
   }
 }

@@ -28,9 +28,14 @@ import com.example.domain.model.SalesInvoiceDetail
 import com.example.domain.model.StockMovementType
 import com.example.domain.model.SubledgerEntryType
 import com.example.domain.model.UnitType
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import org.json.JSONObject
 
-class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
+class InvoiceLifecycleRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val salesDao = db.salesInvoiceDao()
   private val salesItemDao = db.salesInvoiceItemDao()
   private val purchaseDao = db.purchaseInvoiceDao()
@@ -173,7 +178,8 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
     )
   }
 
-  suspend fun editSalesInvoice(req: EditSalesInvoiceRequest) = db.withTransaction {
+  suspend fun editSalesInvoice(req: EditSalesInvoiceRequest) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = req.reason.trim()
     require(cleanReason.isNotBlank()) { "Reason for editing the invoice is mandatory" }
     require(req.lines.isNotEmpty()) { "Sales invoice must keep at least one item line" }
@@ -520,9 +526,11 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 
-  suspend fun editPurchaseInvoice(req: EditPurchaseInvoiceRequest) = db.withTransaction {
+  suspend fun editPurchaseInvoice(req: EditPurchaseInvoiceRequest) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = req.reason.trim()
     require(cleanReason.isNotBlank()) { "Reason for editing purchase invoice is mandatory" }
     require(req.lines.isNotEmpty()) { "Purchase invoice must keep at least one item line" }
@@ -860,6 +868,7 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 
   /**
@@ -871,7 +880,8 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
     invoiceId: Long,
     reason: String,
     paymentMode: InvoiceCancellationPaymentMode = InvoiceCancellationPaymentMode.CONVERT_TO_ADVANCE
-  ) = db.withTransaction {
+  ) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim()
     require(cleanReason.isNotBlank()) { "Cancellation reason is mandatory" }
 
@@ -977,6 +987,7 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 
   /**
@@ -986,7 +997,8 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
     invoiceId: Long,
     reason: String,
     paymentMode: InvoiceCancellationPaymentMode = InvoiceCancellationPaymentMode.CONVERT_TO_ADVANCE
-  ) = db.withTransaction {
+  ) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim()
     require(cleanReason.isNotBlank()) { "Cancellation reason is mandatory" }
 
@@ -1096,5 +1108,6 @@ class InvoiceLifecycleRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 }

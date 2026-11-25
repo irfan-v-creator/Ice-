@@ -4,7 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.remote.FirestoreErrorHandler
+import com.example.data.sync.CloudSyncPausedException
 import com.example.data.sync.CloudSyncRepository
+import com.example.data.sync.CloudSyncSafetyGate
+import com.example.data.sync.CloudSyncSafetyPolicy
+import com.example.data.sync.SyncBlockReason
 import com.example.data.sync.SyncSummary
 import com.example.data.sync.SyncWorkspaceMetaEntity
 import com.example.domain.engine.ConflictCandidate
@@ -16,7 +20,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
@@ -28,6 +31,11 @@ data class CloudSyncUiState(
   val userDisplayName: String = "",
   val isSyncing: Boolean = false,
   val isOfflineQueueReady: Boolean = true,
+  val isCloudSyncPaused: Boolean = CloudSyncSafetyGate.isPhase1SyncPaused,
+  val reconciliationRequired: Boolean = false,
+  val pauseBannerMessage: String? = if (CloudSyncSafetyGate.isPhase1SyncPaused) {
+    SyncBlockReason.PHASE1_PAUSED.userMessage
+  } else null,
   val syncedCount: Int = 0,
   val pendingCount: Int = 0,
   val conflictCount: Int = 0,
@@ -43,7 +51,9 @@ class CloudSyncViewModel(
   private val uid: String,
   private val userEmail: String,
   private val userDisplayName: String,
-  private val syncRepository: CloudSyncRepository
+  private val syncRepository: CloudSyncRepository,
+  private val syncGate: CloudSyncSafetyPolicy = CloudSyncSafetyGate,
+  private val isReconciliationRequired: () -> Boolean = { false }
 ) : ViewModel() {
 
   private val _busyAndStatus = MutableStateFlow(
@@ -81,11 +91,21 @@ class CloudSyncViewModel(
     _busyAndStatus
   ) { meta: SyncWorkspaceMetaEntity?, conflicts, remoteSyncMs, busyTuple ->
     val (isBusy, summaryMsg, uiErr) = busyTuple
+    val reconcile = isReconciliationRequired()
+    val paused = syncGate.isPhase1SyncPaused || reconcile
+    val pauseBanner = when {
+      reconcile -> SyncBlockReason.RECOVERY_REQUIRED.userMessage
+      syncGate.isPhase1SyncPaused -> SyncBlockReason.PHASE1_PAUSED.userMessage
+      else -> null
+    }
     CloudSyncUiState(
       uid = uid,
       userEmail = userEmail,
       userDisplayName = userDisplayName,
       isSyncing = isBusy,
+      isCloudSyncPaused = paused,
+      reconciliationRequired = reconcile,
+      pauseBannerMessage = pauseBanner,
       syncedCount = meta?.syncedCount ?: 0,
       pendingCount = meta?.pendingCount ?: 0,
       conflictCount = conflicts.size,
@@ -102,19 +122,29 @@ class CloudSyncViewModel(
     initialValue = CloudSyncUiState(
       uid = uid,
       userEmail = userEmail,
-      userDisplayName = userDisplayName
+      userDisplayName = userDisplayName,
+      isCloudSyncPaused = syncGate.isPhase1SyncPaused || isReconciliationRequired(),
+      reconciliationRequired = isReconciliationRequired(),
+      pauseBannerMessage = when {
+        isReconciliationRequired() -> SyncBlockReason.RECOVERY_REQUIRED.userMessage
+        syncGate.isPhase1SyncPaused -> SyncBlockReason.PHASE1_PAUSED.userMessage
+        else -> null
+      }
     )
   )
 
   init {
-    refreshQueueAndSyncIfSignedIn()
+    refreshLocalQueueSummaryIfSignedIn()
   }
 
-  fun refreshQueueAndSyncIfSignedIn() {
+  /**
+   * Phase 1 Option 1: App launch refreshes ONLY the local pending sync queue summary
+   * in Room without invoking Firestore or auto-starting cloud sync.
+   */
+  fun refreshLocalQueueSummaryIfSignedIn() {
     if (FirebaseAuth.getInstance().currentUser?.uid != uid) return
     viewModelScope.launch {
       runCatching { syncRepository.refreshLocalPendingQueueSummary() }
-      syncNow(forceRetryFailed = false)
     }
   }
 
@@ -131,7 +161,12 @@ class CloudSyncViewModel(
           _busyAndStatus.value = Triple(false, msg, null)
         },
         onFailure = { error ->
-          _busyAndStatus.value = Triple(false, null, FirestoreErrorHandler.userFriendlyMessage(error))
+          val msg = if (error is CloudSyncPausedException) {
+            error.message ?: SyncBlockReason.PHASE1_PAUSED.userMessage
+          } else {
+            FirestoreErrorHandler.userFriendlyMessage(error)
+          }
+          _busyAndStatus.value = Triple(false, null, msg)
         }
       )
     }
@@ -150,7 +185,12 @@ class CloudSyncViewModel(
           _busyAndStatus.value = Triple(false, "Conflict resolved for ${candidate.displayLabel}.", null)
         },
         onFailure = { error ->
-          _busyAndStatus.value = Triple(false, null, FirestoreErrorHandler.userFriendlyMessage(error))
+          val msg = if (error is CloudSyncPausedException) {
+            error.message ?: SyncBlockReason.PHASE1_PAUSED.userMessage
+          } else {
+            FirestoreErrorHandler.userFriendlyMessage(error)
+          }
+          _busyAndStatus.value = Triple(false, null, msg)
         }
       )
     }
@@ -160,19 +200,28 @@ class CloudSyncViewModel(
     _busyAndStatus.value = Triple(_busyAndStatus.value.first, null, null)
   }
 
-  suspend fun cleanupOnSignOut() {
-    syncRepository.detachAllListeners()
+  suspend fun cleanupOnSignOut(): Result<Unit> {
+    return syncRepository.detachAllListenersStrict()
   }
 
   class Factory(
     private val uid: String,
     private val userEmail: String,
     private val userDisplayName: String,
-    private val syncRepository: CloudSyncRepository
+    private val syncRepository: CloudSyncRepository,
+    private val syncGate: CloudSyncSafetyPolicy = CloudSyncSafetyGate,
+    private val isReconciliationRequired: () -> Boolean = { false }
   ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-      return CloudSyncViewModel(uid, userEmail, userDisplayName, syncRepository) as T
+      return CloudSyncViewModel(
+        uid = uid,
+        userEmail = userEmail,
+        userDisplayName = userDisplayName,
+        syncRepository = syncRepository,
+        syncGate = syncGate,
+        isReconciliationRequired = isReconciliationRequired
+      ) as T
     }
   }
 }

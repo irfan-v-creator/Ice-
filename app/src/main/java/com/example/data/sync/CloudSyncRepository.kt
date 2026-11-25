@@ -11,12 +11,15 @@ import com.example.domain.engine.ConflictCandidate
 import com.example.domain.engine.ConflictResolutionStrategy
 import com.example.domain.engine.SyncComparisonDecision
 import com.example.domain.engine.SyncStatus
+import com.example.session.DefaultFirestoreLifecycleGateway
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.PersistentCacheSettings
+import com.google.firebase.firestore.MemoryCacheSettings
 import com.google.firebase.firestore.firestoreSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +45,9 @@ class CloudSyncRepository(
   private val localDb: IceTrackDatabase,
   private val syncDb: IceTrackSyncDatabase,
   private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
+  private val syncGate: CloudSyncSafetyPolicy = CloudSyncSafetyGate,
+  private val mutationGate: SessionMutationGate? = null,
+  private val isReconciliationRequired: () -> Boolean = { false },
   private val firestoreProvider: () -> FirebaseFirestore = {
     createConfiguredFirestore(context)
   }
@@ -81,10 +87,17 @@ class CloudSyncRepository(
 
   /**
    * User-scoped realtime workspace observer so changes pushed from another signed-in device
-   * surface immediately in UI state. Emits Pair(lastSyncAtEpochMs, errorOrNull).
+   * surface immediately in UI state when Cloud Sync is enabled.
+   * During Phase 1 pause / recovery / frozen state, completes cleanly without initializing Firestore.
    */
   fun observeRemoteWorkspaceVersion(uid: String): Flow<Long?> = callbackFlow {
-    if (auth.currentUser?.uid != uid) {
+    val activeUid = auth.currentUser?.uid
+    val decision = syncGate.checkSyncAllowed(
+      uid = activeUid,
+      mutationGate = mutationGate,
+      recoveryPending = isReconciliationRequired()
+    )
+    if (uid.isBlank() || activeUid != uid || decision is SyncGateDecision.Blocked) {
       trySend(null)
       awaitClose { }
       return@callbackFlow
@@ -107,17 +120,32 @@ class CloudSyncRepository(
     }
   }
 
-  suspend fun detachAllListeners() {
+  suspend fun detachAllListenersStrict(): Result<Unit> {
     val snapshot = synchronized(activeListeners) {
       val copy = activeListeners.toList()
       activeListeners.clear()
       copy
     }
-    snapshot.forEach { runCatching { it.remove() } }
+    var firstFailure: Throwable? = null
+    for (registration in snapshot) {
+      try {
+        registration.remove()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (t: Throwable) {
+        if (firstFailure == null) firstFailure = t
+      }
+    }
+    return firstFailure?.let { Result.failure(it) } ?: Result.success(Unit)
+  }
+
+  suspend fun detachAllListeners() {
+    detachAllListenersStrict()
   }
 
   suspend fun refreshLocalPendingQueueSummary(): SyncWorkspaceMetaEntity? = withContext(Dispatchers.IO) {
-    val uid = auth.currentUser?.uid ?: return@withContext null
+    guardSessionMutation(mutationGate) {
+      val uid = auth.currentUser?.uid ?: return@guardSessionMutation null
     val now = System.currentTimeMillis()
     val dao = syncDb.syncStateDao()
     val existing = dao.getAllForUserSync(uid).associateBy { "${it.entityType}:${it.localKey}" }
@@ -154,22 +182,42 @@ class CloudSyncRepository(
       }
     }
     if (updates.isNotEmpty()) dao.upsertAllRecords(updates)
-    recomputeWorkspaceMeta(uid, lastSyncedAtMs = null, lastError = null)
+      recomputeWorkspaceMeta(uid, lastSyncedAtMs = null, lastError = null)
+    }
   }
 
   suspend fun syncNow(forceRetryFailed: Boolean = true): Result<SyncSummary> = syncMutex.withLock {
     withContext(Dispatchers.IO) {
-      val uid = try {
-        requireUserId()
-      } catch (e: Exception) {
-        return@withContext Result.failure(e)
+      val uid = auth.currentUser?.uid
+      val gateDecision = syncGate.checkSyncAllowed(
+        uid = uid,
+        mutationGate = mutationGate,
+        recoveryPending = isReconciliationRequired()
+      )
+      if (gateDecision is SyncGateDecision.Blocked) {
+        return@withContext Result.failure(
+          CloudSyncPausedException(gateDecision.reason, gateDecision.details)
+        )
       }
+      val resolvedUid = uid ?: return@withContext Result.failure(
+        IllegalStateException("Google Sign-In required before accessing Firestore.")
+      )
 
+      guardSessionMutation(mutationGate) {
+        executeSyncNowInternal(resolvedUid, forceRetryFailed)
+      }
+    }
+  }
+
+  private suspend fun executeSyncNowInternal(
+    uid: String,
+    forceRetryFailed: Boolean
+  ): Result<SyncSummary> {
       val now = System.currentTimeMillis()
       val syncDao = syncDb.syncStateDao()
       val userDocPath = "users/$uid"
 
-      try {
+      return try {
         val user = auth.currentUser
         val businessName = localDb.appSettingDao().getSync("business_name")?.value
         val workspaceRef = firestore.document(userDocPath)
@@ -496,7 +544,6 @@ class CloudSyncRepository(
         recomputeWorkspaceMeta(uid, lastSyncedAtMs = null, lastError = msg)
         Result.failure(e)
       }
-    }
   }
 
   suspend fun resolveConflict(
@@ -504,15 +551,35 @@ class CloudSyncRepository(
     strategy: ConflictResolutionStrategy
   ): Result<Unit> = syncMutex.withLock {
     withContext(Dispatchers.IO) {
-      val uid = try {
-        requireUserId()
-      } catch (e: Exception) {
-        return@withContext Result.failure(e)
+      val uid = auth.currentUser?.uid
+      val gateDecision = syncGate.checkSyncAllowed(
+        uid = uid,
+        mutationGate = mutationGate,
+        recoveryPending = isReconciliationRequired()
+      )
+      if (gateDecision is SyncGateDecision.Blocked) {
+        return@withContext Result.failure(
+          CloudSyncPausedException(gateDecision.reason, gateDecision.details)
+        )
       }
+      val resolvedUid = uid ?: return@withContext Result.failure(
+        IllegalStateException("Google Sign-In required before resolving conflicts.")
+      )
+      guardSessionMutation(mutationGate) {
+        executeResolveConflictInternal(resolvedUid, candidate, strategy)
+      }
+    }
+  }
+
+  private suspend fun executeResolveConflictInternal(
+    uid: String,
+    candidate: ConflictCandidate,
+    strategy: ConflictResolutionStrategy
+  ): Result<Unit> {
       val now = System.currentTimeMillis()
       val syncDao = syncDb.syncStateDao()
       val spec = specs.firstOrNull { it.collectionName == candidate.entityType }
-        ?: return@withContext Result.failure(IllegalArgumentException("Unknown entityType ${candidate.entityType}"))
+        ?: return Result.failure(IllegalArgumentException("Unknown entityType ${candidate.entityType}"))
 
       val localKey = if (spec.collectionName == "app_settings") {
         SyncCollectionSpec.parseRemotePayloadForConflict(candidate.cloudPayloadJson)["settingKey"] as? String
@@ -522,7 +589,7 @@ class CloudSyncRepository(
       }
 
       val docPath = "users/$uid/${spec.collectionName}/${candidate.cloudDocId}"
-      try {
+      return try {
         when (strategy) {
           ConflictResolutionStrategy.APPLY_CLOUD_TO_LOCAL -> {
             val payload = SyncCollectionSpec.parseRemotePayloadForConflict(candidate.cloudPayloadJson)
@@ -554,7 +621,7 @@ class CloudSyncRepository(
 
           ConflictResolutionStrategy.KEEP_LOCAL_OVERWRITE_CLOUD -> {
             val row = spec.loadLocalRows(uid, localDb, now).firstOrNull { it.cloudDocId == candidate.cloudDocId }
-              ?: return@withContext Result.failure(IllegalStateException("Local record no longer exists."))
+              ?: return Result.failure(IllegalStateException("Local record no longer exists."))
             val docRef = firestore.document(docPath)
             val remoteSnap = docRef.get().await()
             if (!remoteSnap.exists()) {
@@ -562,7 +629,7 @@ class CloudSyncRepository(
               docRef.set(createMap).await()
             } else {
               if (spec.appendOnly) {
-                return@withContext Result.failure(
+                return Result.failure(
                   IllegalStateException("Immutable financial/audit records cannot overwrite cloud history. Choose Apply Cloud instead.")
                 )
               }
@@ -582,7 +649,7 @@ class CloudSyncRepository(
               val (rehashedFields, rehash) = FirestoreSyncMappers.businessFieldsWithHash(adjustedFields)
               val remoteData = FirestoreSyncMappers.serverEstimate(remoteSnap)
               if (!spec.canUpdateRemote(rehashedFields, remoteData)) {
-                return@withContext Result.failure(
+                return Result.failure(
                   IllegalStateException("Cloud record reached a locked financial state and cannot be overwritten.")
                 )
               }
@@ -607,7 +674,7 @@ class CloudSyncRepository(
                 )
               )
               recomputeWorkspaceMeta(uid, lastSyncedAtMs = now, lastError = null)
-              return@withContext Result.success(Unit)
+              return Result.success(Unit)
             }
           }
         }
@@ -619,7 +686,6 @@ class CloudSyncRepository(
         FirestoreErrorHandler.handleFirestoreError(e, OperationType.UPDATE, docPath)
         Result.failure(e)
       }
-    }
   }
 
   private suspend fun recomputeWorkspaceMeta(
@@ -644,14 +710,22 @@ class CloudSyncRepository(
   }
 
   companion object {
+    /**
+     * Phase 1 Data Safety Mode:
+     * Uses MemoryCacheSettings (disabling Firestore's automatic on-disk persistent mutation replay
+     * queue across process restarts) so pending SDK mutations can NEVER replay before startup crash
+     * recovery, UID verification, and CloudSyncSafetyGate checks complete.
+     * Local offline durability is provided strictly by the per-UID Room databases (business + sync).
+     */
     fun createConfiguredFirestore(context: Context): FirebaseFirestore {
       val databaseId = context.getString(R.string.firestore_database_id)
       val instance = FirebaseFirestore.getInstance(databaseId)
       runCatching {
         instance.firestoreSettings = firestoreSettings {
-          setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
+          setLocalCacheSettings(MemoryCacheSettings.newBuilder().build())
         }
       }
+      DefaultFirestoreLifecycleGateway.markFirestoreInstanceCreated()
       return instance
     }
   }

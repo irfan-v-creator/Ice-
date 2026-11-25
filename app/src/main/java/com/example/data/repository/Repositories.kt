@@ -57,6 +57,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
+import com.example.session.SessionMutationGate
+import com.example.session.guardSessionMutation
 import org.json.JSONObject
 
 class CreditLimitExceededException(
@@ -64,7 +66,10 @@ class CreditLimitExceededException(
   override val message: String
 ) : IllegalStateException(message)
 
-class ProductRepository(private val db: IceTrackDatabase) {
+class ProductRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val productDao = db.productDao()
   private val unitDao = db.productUnitDao()
   private val productSupplierDao = db.productSupplierDao()
@@ -108,7 +113,8 @@ class ProductRepository(private val db: IceTrackDatabase) {
     piecesPerBox: Int,
     boxesPerCarton: Int,
     supplierCosts: List<ProductSupplier> = emptyList()
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     UnitConversionEngine.validateRatios(piecesPerBox, boxesPerCarton)
 
     val existingProduct = if (product.id != 0L) productDao.getProductSync(product.id) else null
@@ -154,14 +160,18 @@ class ProductRepository(private val db: IceTrackDatabase) {
     }
 
     productId
+    }
   }
 
-  suspend fun softDelete(productId: Long) {
+  suspend fun softDelete(productId: Long) = guardSessionMutation(mutationGate) {
     productDao.softDelete(productId)
   }
 }
 
-class SupplierRepository(private val db: IceTrackDatabase) {
+class SupplierRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val supplierDao = db.supplierDao()
   private val subledgerDao = db.subledgerDao()
   private val allocationDao = db.paymentAllocationDao()
@@ -218,7 +228,8 @@ class SupplierRepository(private val db: IceTrackDatabase) {
   suspend fun saveSupplier(
     supplier: Supplier,
     openingEditReason: String = "Opening balance updated"
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val isNew = supplier.id == 0L
     val existing = if (!isNew) {
       supplierDao.getSupplierSync(supplier.id)
@@ -480,14 +491,18 @@ class SupplierRepository(private val db: IceTrackDatabase) {
     }
 
     supplierId
+    }
   }
 
-  suspend fun softDelete(supplierId: Long) {
+  suspend fun softDelete(supplierId: Long) = guardSessionMutation(mutationGate) {
     supplierDao.softDelete(supplierId)
   }
 }
 
-class CustomerRepository(private val db: IceTrackDatabase) {
+class CustomerRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val customerDao = db.customerDao()
   private val subledgerDao = db.subledgerDao()
   private val priceDao = db.customerProductPriceDao()
@@ -549,7 +564,8 @@ class CustomerRepository(private val db: IceTrackDatabase) {
     customPrices: List<CustomerProductPrice> = emptyList(),
     replaceCustomPrices: Boolean = false,
     openingEditReason: String = "Opening balance updated"
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val isNew = customer.id == 0L
     val existing = if (!isNew) {
       customerDao.getCustomerSync(customer.id)
@@ -827,14 +843,18 @@ class CustomerRepository(private val db: IceTrackDatabase) {
     }
 
     customerId
+    }
   }
 
-  suspend fun softDelete(customerId: Long) {
+  suspend fun softDelete(customerId: Long) = guardSessionMutation(mutationGate) {
     customerDao.softDelete(customerId)
   }
 }
 
-class SubledgerRepository(private val db: IceTrackDatabase) {
+class SubledgerRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val subledgerDao = db.subledgerDao()
   private val allocationDao = db.paymentAllocationDao()
   private val purchaseDao = db.purchaseInvoiceDao()
@@ -877,11 +897,11 @@ class SubledgerRepository(private val db: IceTrackDatabase) {
     }
   }
 
-  suspend fun recordEntry(entry: SubledgerEntry): Long {
-    return subledgerDao.insert(entry.toEntity())
+  suspend fun recordEntry(entry: SubledgerEntry): Long = guardSessionMutation(mutationGate) {
+    subledgerDao.insert(entry.toEntity())
   }
 
-  suspend fun reverseEntry(entryId: Long) {
+  suspend fun reverseEntry(entryId: Long) = guardSessionMutation(mutationGate) {
     val entry = subledgerDao.getByIdSync(entryId)
       ?: throw IllegalArgumentException("Subledger entry #$entryId not found")
     if (entry.entryType == SubledgerEntryType.PAYMENT) {
@@ -915,7 +935,8 @@ class SubledgerRepository(private val db: IceTrackDatabase) {
     entryId: Long,
     reason: String,
     advanceStrategy: AdvanceReversalStrategy = AdvanceReversalStrategy.BLOCK_IF_CONSUMED
-  ) = db.withTransaction {
+  ) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanReason = reason.trim()
     require(cleanReason.isNotBlank()) { "Payment reversal reason is mandatory" }
 
@@ -1012,17 +1033,21 @@ class SubledgerRepository(private val db: IceTrackDatabase) {
         createdAt = now
       )
     )
+    }
   }
 }
 
-class SettingsRepository(private val db: IceTrackDatabase) {
+class SettingsRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val appSettingDao = db.appSettingDao()
 
   fun getSetting(key: String, defaultValue: String = ""): Flow<String> {
     return appSettingDao.get(key).map { it?.value ?: defaultValue }
   }
 
-  suspend fun setSetting(key: String, value: String) {
+  suspend fun setSetting(key: String, value: String) = guardSessionMutation(mutationGate) {
     appSettingDao.set(AppSettingEntity(key = key, value = value))
   }
 }
@@ -1031,7 +1056,10 @@ class SettingsRepository(private val db: IceTrackDatabase) {
 // Step 2 Repositories: Inventory, Purchases, Sales & Expenses
 // ==========================================
 
-class InventoryRepository(private val db: IceTrackDatabase) {
+class InventoryRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val batchDao = db.productBatchDao()
   private val movementDao = db.stockMovementDao()
 
@@ -1068,7 +1096,8 @@ class InventoryRepository(private val db: IceTrackDatabase) {
     adjustmentPieces: Int,
     reason: String,
     movementType: StockMovementType = StockMovementType.STOCK_ADJUSTMENT
-  ) = db.withTransaction {
+  ) = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     require(adjustmentPieces != 0) { "Adjustment quantity must be non-zero" }
     require(reason.isNotBlank()) { "Adjustment reason cannot be empty" }
 
@@ -1105,10 +1134,14 @@ class InventoryRepository(private val db: IceTrackDatabase) {
         notes = reason.trim()
       )
     )
+    }
   }
 }
 
-class PurchaseRepository(private val db: IceTrackDatabase) {
+class PurchaseRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val purchaseDao = db.purchaseInvoiceDao()
   private val itemDao = db.purchaseInvoiceItemDao()
   private val batchDao = db.productBatchDao()
@@ -1160,7 +1193,8 @@ class PurchaseRepository(private val db: IceTrackDatabase) {
     discountType: DiscountType = DiscountType.NONE,
     discountValueRaw: Long = 0L,
     additionalChargesPaise: Long = 0L
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanInvoiceNumber = invoiceNumber.trim()
     require(cleanInvoiceNumber.isNotBlank()) { "Purchase invoice number cannot be blank" }
     require(items.isNotEmpty()) { "Purchase invoice must have at least one product line" }
@@ -1408,6 +1442,7 @@ class PurchaseRepository(private val db: IceTrackDatabase) {
     }
 
     invoiceId
+    }
   }
 
   private suspend fun buildSupplierOpeningTargets(supplierId: Long): List<OpeningBalanceAllocationTarget> {
@@ -1435,7 +1470,8 @@ class PurchaseRepository(private val db: IceTrackDatabase) {
     paymentDate: Long,
     paymentMethod: PaymentMethod,
     notes: String
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     require(amountPaise > 0) { "Payment amount must be greater than zero" }
 
     // 1. Record in Subledger (Debit AP, reducing what we owe)
@@ -1489,12 +1525,14 @@ class PurchaseRepository(private val db: IceTrackDatabase) {
     }
 
     subledgerId
+    }
   }
 
   suspend fun applyAvailableSupplierAdvance(
     supplierId: Long,
     appliedAt: Long = System.currentTimeMillis()
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val activeAdvances = allocationDao.getActiveAllocationsByTypeForPartySync(
       partyType = PartyType.SUPPLIER,
       partyId = supplierId,
@@ -1551,10 +1589,14 @@ class PurchaseRepository(private val db: IceTrackDatabase) {
       totalApplied += settled
     }
     totalApplied
+    }
   }
 }
 
-class SalesRepository(private val db: IceTrackDatabase) {
+class SalesRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val salesDao = db.salesInvoiceDao()
   private val itemDao = db.salesInvoiceItemDao()
   private val batchDao = db.productBatchDao()
@@ -1626,7 +1668,8 @@ class SalesRepository(private val db: IceTrackDatabase) {
     discountType: DiscountType = DiscountType.NONE,
     discountValueRaw: Long = 0L,
     additionalChargesPaise: Long = 0L
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val cleanInvoiceNumber = invoiceNumber.trim()
     require(cleanInvoiceNumber.isNotBlank()) { "Sales invoice number cannot be blank" }
     require(requestedLines.isNotEmpty()) { "Sales invoice must have at least one product line" }
@@ -1905,6 +1948,7 @@ class SalesRepository(private val db: IceTrackDatabase) {
     }
 
     invoiceId
+    }
   }
 
   private suspend fun buildCustomerOpeningTargets(customerId: Long): List<OpeningBalanceAllocationTarget> {
@@ -1932,7 +1976,8 @@ class SalesRepository(private val db: IceTrackDatabase) {
     paymentDate: Long,
     paymentMethod: PaymentMethod,
     notes: String
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     require(amountPaise > 0) { "Payment amount must be greater than zero" }
 
     // 1. Record in Subledger (Credit AR, reducing customer debt)
@@ -1986,12 +2031,14 @@ class SalesRepository(private val db: IceTrackDatabase) {
     }
 
     subledgerId
+    }
   }
 
   suspend fun applyAvailableCustomerAdvance(
     customerId: Long,
     appliedAt: Long = System.currentTimeMillis()
-  ): Long = db.withTransaction {
+  ): Long = guardSessionMutation(mutationGate) {
+    db.withTransaction {
     val activeAdvances = allocationDao.getActiveAllocationsByTypeForPartySync(
       partyType = PartyType.CUSTOMER,
       partyId = customerId,
@@ -2048,10 +2095,14 @@ class SalesRepository(private val db: IceTrackDatabase) {
       totalApplied += settled
     }
     totalApplied
+    }
   }
 }
 
-class ExpenseRepository(private val db: IceTrackDatabase) {
+class ExpenseRepository(
+  private val db: IceTrackDatabase,
+  private val mutationGate: SessionMutationGate? = null
+) {
   private val expenseDao = db.expenseDao()
 
   val allExpenses: Flow<List<Expense>> = expenseDao.getAllActive().map { list ->
@@ -2065,9 +2116,9 @@ class ExpenseRepository(private val db: IceTrackDatabase) {
     paymentMethod: PaymentMethod,
     referenceNumber: String = "",
     notes: String = ""
-  ): Long {
+  ): Long = guardSessionMutation(mutationGate) {
     require(amountPaise > 0) { "Expense amount must be greater than zero" }
-    return expenseDao.insert(
+    expenseDao.insert(
       ExpenseEntity(
         category = category,
         amountPaise = amountPaise,
@@ -2079,7 +2130,7 @@ class ExpenseRepository(private val db: IceTrackDatabase) {
     )
   }
 
-  suspend fun softDelete(expenseId: Long) {
+  suspend fun softDelete(expenseId: Long) = guardSessionMutation(mutationGate) {
     expenseDao.softDelete(expenseId)
   }
 }

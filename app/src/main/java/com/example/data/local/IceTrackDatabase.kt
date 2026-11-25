@@ -115,16 +115,73 @@ abstract class IceTrackDatabase : RoomDatabase() {
   abstract fun financialAuditLogDao(): FinancialAuditLogDao
 
   companion object {
-    @Volatile
-    private var INSTANCE: IceTrackDatabase? = null
+    const val LEGACY_GLOBAL_DB_NAME = "icetrack_database.db"
 
+    private val openInstances = mutableMapOf<String, IceTrackDatabase>()
+
+    /**
+     * Unauthenticated global database opening is explicitly prohibited by Phase 1 P0 Data Isolation.
+     */
+    @Deprecated(
+      message = "Global unauthenticated database access is prohibited. Use openForUid(context, uid) via SessionScopeManager.",
+      level = DeprecationLevel.ERROR
+    )
     fun getInstance(context: Context): IceTrackDatabase {
-      return INSTANCE ?: synchronized(this) {
-        val instance = Room.databaseBuilder(
-          context.applicationContext,
-          IceTrackDatabase::class.java,
-          "icetrack_database.db"
-        )
+      throw IllegalStateException(
+        "Unauthenticated global IceTrackDatabase access is prohibited. Sign in and use SessionScopeManager."
+      )
+    }
+
+    fun openForUid(context: Context, uid: String): IceTrackDatabase {
+      val trimmedUid = uid.trim()
+      require(trimmedUid.isNotEmpty()) { "Cannot open business database without a valid authenticated UID." }
+      val uidHash = DatabaseIntegrityManager.uidToSafeHash(trimmedUid)
+      val dbName = DatabaseIntegrityManager.uidBusinessDbName(trimmedUid)
+      return synchronized(openInstances) {
+        val existing = openInstances[uidHash]
+        if (existing != null && existing.isOpen) {
+          existing
+        } else {
+          val built = buildRoomDatabase(context.applicationContext, dbName)
+          val report = DatabaseIntegrityManager.verifyIntegrity(built.openHelper.writableDatabase)
+          if (!report.isHealthy) {
+            runCatching { built.close() }
+            throw IllegalStateException(
+              "Database integrity verification failed for account ($uidHash): ${report.integrityMessage}, fkViolations=${report.foreignKeyViolationCount}"
+            )
+          }
+          openInstances[uidHash] = built
+          built
+        }
+      }
+    }
+
+    fun closeForUid(uid: String): Result<Unit> {
+      val trimmedUid = uid.trim()
+      if (trimmedUid.isEmpty()) return Result.success(Unit)
+      val uidHash = DatabaseIntegrityManager.uidToSafeHash(trimmedUid)
+      val instance = synchronized(openInstances) { openInstances[uidHash] } ?: return Result.success(Unit)
+      val closeResult = DatabaseIntegrityManager.closeSafely(instance)
+      if (closeResult.isSuccess) {
+        synchronized(openInstances) {
+          if (openInstances[uidHash] === instance) {
+            openInstances.remove(uidHash)
+          }
+        }
+      }
+      return closeResult
+    }
+
+    internal fun openMigratedLegacyDatabase(context: Context): IceTrackDatabase {
+      return buildRoomDatabase(context.applicationContext, LEGACY_GLOBAL_DB_NAME)
+    }
+
+    internal fun buildRoomDatabase(context: Context, dbName: String): IceTrackDatabase {
+      return Room.databaseBuilder(
+        context.applicationContext,
+        IceTrackDatabase::class.java,
+        dbName
+      )
         .addMigrations(
           DatabaseMigrations.MIGRATION_1_2,
           DatabaseMigrations.MIGRATION_2_3,
@@ -132,9 +189,6 @@ abstract class IceTrackDatabase : RoomDatabase() {
           DatabaseMigrations.MIGRATION_4_5
         )
         .build()
-        INSTANCE = instance
-        instance
-      }
     }
   }
 }
